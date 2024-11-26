@@ -1,12 +1,12 @@
 # create an enviornment then start flash file
-#  creating an enviornment:  python3 -m venv venv
-# activate the enviornment: source venv/bin/activate
-# start the server: python3 app.py
+#  creating an enviornment:  python -m venv venv
+# activate the enviornment: source
+#                           venv\Scripts\activate
+# start the server: python app.py
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import json
 import random
-import numpy as np
 
 app = Flask(__name__)
 CORS(app, resources={r"/api/*": {"origins": "http://localhost:3000"}})
@@ -53,6 +53,13 @@ def calculate_adjusted_usage(data, selected_days, selected_set, selected_month, 
     except Exception as e:
         print(f"Error in calculate_adjusted_usage: {str(e)}")
         raise
+def calculate_bills(total_consumption, grid_energy_taken, grid_energy_supplied, consumption_rate=10, selling_rate=2):
+    expected_bill = total_consumption * consumption_rate
+    actual_bill = grid_energy_taken * consumption_rate
+    supply_bill = grid_energy_supplied * selling_rate # Optional: calculate value for energy supplied
+    cost_reduced = expected_bill - actual_bill
+    return expected_bill, actual_bill, cost_reduced, supply_bill  # Include supply_bill if needed
+
 
 @app.route('/api/data', methods=['POST'])
 def get_data():
@@ -61,7 +68,7 @@ def get_data():
         selected_set = content['selected_set']
         selected_month = content['selected_month']
         selected_days = [int(day) for day in content['selected_days']]
-        c_rate = content.get('c_rate', 0.5) # Default c_rate to 0.5 if not provided
+        c_rate = content.get('c_rate', 0.5)  # Default c_rate to 0.5 if not provided
 
         with open("UG.JSON", "r") as file:
             input_data = json.load(file)
@@ -77,40 +84,65 @@ def get_data():
         max_change = max_bh * x
         battery_data = []
         grid_data = []
-        soc_data = []  # List to store SOC data for each day
+        battery_difference_data = []
+        bh = 0
+        prev = 0
+        total_grid_energy_taken = 0
+        total_grid_energy_supplied = 0
 
         for day_index in range(len(selected_days)):
             generation_flat = generation[day_index]
             consumption_flat = consumption[day_index]
             battery = [0] * time_steps
             grid = [0] * time_steps
-            soc = [0] * time_steps  # State of Charge data
-            bh = 0  # Battery energy level
+            bh = prev
+            battery_difference = [0] * time_steps
 
             for i in range(time_steps):
+                temp = bh
                 bh += generation_flat[i] - consumption_flat[i]
+                
                 if bh < 0:
                     grid[i] = -bh
+                    total_grid_energy_taken += max(0, grid[i])  # Accumulate positive grid energy
+                    total_grid_energy_supplied += min(0, grid[i])  # Accumulate negative grid energy
                     bh = 0
                 elif bh > max_bh:
                     grid[i] = max_bh - bh
                     bh = max_bh
                 else:
                     grid[i] = 0
-
-                battery[i] = consumption_flat[i] - generation_flat[i] - grid[i]
-                soc[i] = (bh / max_bh) * 100  # Calculate SOC as a percentage
+                
+                if bh > temp and bh - temp > max_change:
+                    grid[i] -= (bh - temp - max_change)
+                    bh = temp + max_change
+                elif bh < temp and temp - bh > max_change:
+                    grid[i] += (temp - bh - max_change)
+                    bh = temp - max_change
+                
+                battery[i] = (bh / max_bh) * 100
+                prev = bh
+                battery_difference[i] = temp - bh
 
             battery_data.append(battery)
             grid_data.append(grid)
-            soc_data.append(soc)  # Add the SOC data for the day
+            battery_difference_data.append(battery_difference)
+
+        # Calculate bills with separated grid energy values
+        expected_bill, actual_bill, cost_reduced, supply_bill = calculate_bills(
+            total_consumption, total_grid_energy_taken, abs(total_grid_energy_supplied)
+        )
 
         return jsonify({
             'consumption': consumption,
             'generation': generation,
             'battery': battery_data,
             'grid': grid_data,
-            'soc': soc_data  # Return the SOC data in the response
+            'battery_difference': battery_difference_data,
+            'expected_bill': expected_bill,
+            'actual_bill': actual_bill,
+            'cost_reduced': cost_reduced,
+            'supply_bill': supply_bill  # Optional: return supply bill if needed
         })
     except Exception as e:
         print(f"Error: {e}")
